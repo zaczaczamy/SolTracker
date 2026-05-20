@@ -281,12 +281,12 @@ const connect = () => {
                     // phrase substring (lowercase) that identifies the aura, plus
                     // the display metadata to use instead of regex capture groups.
                     const customAuras = {
-                        "pixelated": { name: "▣ PIXELATION ▣",   chance: "1,073,741,824", color: 0x00FFCC, phrase: "has become pixelated"               },
-                        "luminosity": { name: "[ LUMINOSITY ]",   chance: "1,200,000,000", color: 0xFFFFFF, phrase: "the blinding light has devoured"     },
-                        "equinox":    { name: "『EQUINOX』",      chance: "2,500,000,000", color: 0xFF8C00, phrase: "has found the [???????] between positive and **negative**" },
-                        "leviathan":  { name: "LEVIATHAN",        chance: "1,730,400,000", color: 0x00008B, phrase: "has tamed the ruler of beneath"      },
-                        "glitch":     { name: "GLITCH",           chance: "12,210,110",    color: 0x8A2BE2, phrase: "error occurred from"                 },
-                        "nyctophobia":{ name: "NYCTOPHOBIA",      chance: "1,011,111,010", color: 0x1A1A1A, phrase: "experienced the literal nightmare"   },
+                        "pixelated":  { name: "▣ PIXELATION ▣",  chance: "1,073,741,824", color: 0x00FFCC, phrase: "has become pixelated"             },
+                        "luminosity": { name: "[ LUMINOSITY ]",   chance: "1,200,000,000", color: 0xFFFFFF, phrase: "the blinding light has devoured"   },
+                        "equinox":    { name: "『EQUINOX』",      chance: "2,500,000,000", color: 0xFF8C00, phrase: "between positive and"              },
+                        "leviathan":  { name: "LEVIATHAN",        chance: "1,730,400,000", color: 0x00008B, phrase: "has tamed the ruler of beneath"    },
+                        "glitch":     { name: "GLITCH",           chance: "12,210,110",    color: 0x8A2BE2, phrase: "error occured from"                },
+                        "nyctophobia":{ name: "NYCTOPHOBIA",      chance: "1,011,111,010", color: 0x1A1A1A, phrase: "experienced the literal nightmare" },
                     };
 
                     const publicEmbeds = [];
@@ -295,7 +295,8 @@ const connect = () => {
                     for (let lineIdx = 0; lineIdx < lines.length; lineIdx++) {
                         const line = lines[lineIdx];
                         const lineLower = line.toLowerCase();
-
+                        console.log(`[RAW LINE] ${line}`);
+                        
                         // ── Custom aura detection (bypasses standard regex) ──
                         // Check each custom phrase before falling through to the
                         // normal "has found / chance of" regex, so these messages
@@ -310,15 +311,16 @@ const connect = () => {
                                 // **DisplayName(@Username)** — we grab whatever is in the
                                 // first pair of ** ** and treat it as both display name and
                                 // lookup key (stripping a leading @ if present).
-                                const boldMatch = line.match(/\*\*(.+?)\*\*/);
+                                // Gateway format: **DisplayName(@username)** or **@username**
+                                // We parse with the same two-group logic as the standard regex.
+                                const boldMatch = line.match(/\*\*(?:(.+?)\(@(.+?)\)|@(\S+?))\*\*/);
                                 if (!boldMatch) {
                                     console.log(`Custom aura line missing bold username (skipping): ${line.slice(0, 80)}`);
                                     break;
                                 }
 
-                                const rawBold = boldMatch[1]; // e.g. "PlayerName" or "@PlayerName"
-                                username    = rawBold.replace(/^@/, '');
-                                displayName = rawBold.startsWith('@') ? rawBold : `@${username}`;
+                                username    = boldMatch[2] || boldMatch[3];
+                                displayName = boldMatch[1] || `@${username}`;
                                 aura        = entry.name;
                                 chanceStr   = entry.chance;
                                 embedColor  = entry.color;
