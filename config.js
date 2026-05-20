@@ -26,7 +26,7 @@ const config = {
     "gatewayURL": "wss://api.mongoosee.com/solsstattracker/v2/gateway",
 
     "maxReconnectInterval": 120000,
-    "reconnectOnDuplicateConnection": false,
+    "reconnectOnDuplicateConnection": true,
 
     "verboseLogging": true,
 };
