@@ -269,167 +269,125 @@ const connect = () => {
                 }
 
                 case 'executeWebhook': {
-                    const payload = data.data ?? {};
-                    // Raw embeds from the packet (may carry the original Sol's Stat Tracker layout)
-                    const rawEmbeds = Array.isArray(payload.embeds) ? payload.embeds : [];
-                    // The gateway sends rolls as newline-separated plain text in `content`
-                    const lines = (payload.content ?? '').split('\n').filter(l => l.trim());
+    const payload = data.data ?? {};
+    const rawEmbeds = Array.isArray(payload.embeds) ? payload.embeds : [];
+    const lines = (payload.content ?? '').split('\n').filter(l => l.trim());
 
-                    // ── Custom global aura map ────────────────────────────────
-                    // These auras omit "has found" / "chance of" entirely, so the
-                    // standard regex cannot parse them. Each entry lists a unique
-                    // phrase substring (lowercase) that identifies the aura, plus
-                    // the display metadata to use instead of regex capture groups.
-                    const customAuras = {
-                        "pixelated":  { name: "▣ PIXELATION ▣",  chance: "1,073,741,824", color: 0x00FFCC, phrase: "has become pixelated"             },
-                        "luminosity": { name: "[ LUMINOSITY ]",   chance: "1,200,000,000", color: 0xFFFFFF, phrase: "the blinding light has devoured"   },
-                        "equinox":    { name: "『EQUINOX』",      chance: "2,500,000,000", color: 0xFF8C00, phrase: "between positive and"              },
-                        "leviathan":  { name: "LEVIATHAN",        chance: "1,730,400,000", color: 0x00008B, phrase: "has tamed the ruler of beneath"    },
-                        "glitch":     { name: "GLITCH",           chance: "12,210,110",    color: 0x8A2BE2, phrase: "error occured from"                },
-                        "nyctophobia":{ name: "NYCTOPHOBIA",      chance: "1,011,111,010", color: 0x1A1A1A, phrase: "experienced the literal nightmare" },
-                    };
+    // ── Public channel — forward the raw payload exactly as the gateway sent it.
+    // This preserves everything including transcendent auras, formatted embeds, etc.
+    publicWebhookClient.send({
+        username: overrideUsername ?? payload.username,
+        avatarURL: overrideAvatarURL ?? payload.avatarURL,
+        allowedMentions: { parse: [] },
+        content: payload.content ?? undefined,
+        embeds: rawEmbeds
+    }).catch(err => console.error(`Public send error: ${err.message}`));
 
-                    const publicEmbeds = [];
-                    const linkedEmbeds = [];
+    // ── Linked channel — parse content lines for tracked users only.
+    // Transcendent auras won't appear here since they aren't in payload.content,
+    // but all standard globals will be filtered correctly.
+    const linkedEmbeds = [];
 
-                    for (let lineIdx = 0; lineIdx < lines.length; lineIdx++) {
-                        const line = lines[lineIdx];
-                        const lineLower = line.toLowerCase();
-                        console.log(`[RAW LINE] ${line}`);
-                        
-                        // ── Custom aura detection (bypasses standard regex) ──
-                        // Check each custom phrase before falling through to the
-                        // normal "has found / chance of" regex, so these messages
-                        // are never silently dropped.
-                        let username, displayName, aura, chanceStr, embedColor;
-                        let customMatched = false;
+    for (let lineIdx = 0; lineIdx < lines.length; lineIdx++) {
+        const line = lines[lineIdx];
+        const lineLower = line.toLowerCase();
 
-                        for (const [, entry] of Object.entries(customAuras)) {
-                            if (lineLower.includes(entry.phrase)) {
-                                // Extract the username from the first **bold** run in the line.
-                                // Custom globals format the player name as **Username** or
-                                // **DisplayName(@Username)** — we grab whatever is in the
-                                // first pair of ** ** and treat it as both display name and
-                                // lookup key (stripping a leading @ if present).
-                                // Gateway format: **DisplayName(@username)** or **@username**
-                                // We parse with the same two-group logic as the standard regex.
-                                const boldMatch = line.match(/\*\*(?:(.+?)\(@(.+?)\)|@(\S+?))\*\*/);
-                                if (!boldMatch) {
-                                    console.log(`Custom aura line missing bold username (skipping): ${line.slice(0, 80)}`);
-                                    break;
-                                }
+        let username, displayName, aura, chanceStr, embedColor;
+        let customMatched = false;
 
-                                username    = boldMatch[2] || boldMatch[3];
-                                displayName = boldMatch[1] || `@${username}`;
-                                aura        = entry.name;
-                                chanceStr   = entry.chance;
-                                embedColor  = entry.color;
-                                customMatched = true;
+        const customAuras = {
+            "pixelation":  { name: "▣ PIXELATION ▣",  chance: "1,073,741,824", color: 0x00FFCC, phrase: "has become pixelated"             },
+            "luminosity": { name: "[ LUMINOSITY ]",   chance: "1,200,000,000", color: 0xFFFFFF, phrase: "the blinding light has devoured"   },
+            "equinox":    { name: "『EQUINOX』",      chance: "2,500,000,000", color: 0xFF8C00, phrase: "between positive and"              },
+            "leviathan":  { name: "LEVIATHAN",        chance: "1,730,400,000", color: 0x00008B, phrase: "has tamed the ruler of beneath"    },
+            "glitch":     { name: "GLITCH",           chance: "12,210,110",    color: 0x8A2BE2, phrase: "error occured from"                },
+            "nyctophobia":{ name: "NYCTOPHOBIA",      chance: "1,011,111,010", color: 0x1A1A1A, phrase: "experienced the literal nightmare" },
+        };
 
-                                console.log(`Custom aura detected: ${aura} for ${username}`);
-                                break;
-                            }
-                        }
-
-                        if (!customMatched) {
-                            // ── Standard regex path ──────────────────────────
-                            // Handles two formats from the gateway:
-                            //   Format A: **DisplayName(@username)** HAS FOUND **Aura**, CHANCE OF **1 IN X**
-                            //   Format B: **@username** HAS FOUND **Aura**, CHANCE OF **1 IN X**  (no display name)
-                            const m = line.match(
-                                /\*\*(?:(.+?)\(@(.+?)\)|@(\S+?))\*\*.*?(?:HAS FOUND|has found)\s+\*\*(.+?)\*\*.*?(?:CHANCE OF|chance of)\s+\*\*1 IN ([\d,]+)/i
-                            );
-                            if (!m) {
-                                console.log(`Unparseable line (skipping): ${line.slice(0, 80)}`);
-                                continue;
-                            }
-
-                            username    = m[2] || m[3];
-                            displayName = m[1] || `@${username}`;
-                            aura        = m[4];
-                            chanceStr   = m[5];
-                            embedColor  = null; // will be resolved below via isBT
-                        }
-
-                        const isBT = lineLower.includes('breakthrough');
-                        const key = username.toLowerCase();
-                        const tracked = trackedRobloxUsers.get(key);
-
-                        // Extract rolls and luck directly from the data packet.
-                        // Per-line embed fields take priority, then packet-level fields.
-                        const embedForLine = rawEmbeds[lineIdx];
-                        const rollsVal =
-                            embedForLine?.fields?.find(f => /rolls?/i.test(f.name))?.value
-                            ?? payload.rolls
-                            ?? payload.player?.rolls
-                            ?? 'N/A';
-                        const luckVal =
-                            embedForLine?.fields?.find(f => /luck/i.test(f.name))?.value
-                            ?? payload.luck
-                            ?? payload.player?.luck
-                            ?? 'N/A';
-
-                        totalRollsProcessed++;
-
-                        // Direct link for tracked users; username-lookup for everyone else
-                        const trackedProfileURL = tracked
-                            ? `https://www.roblox.com/users/${tracked.id}/profile`
-                            : null;
-                        const publicProfileURL = trackedProfileURL
-                            ?? `https://www.roblox.com/users/profile?username=${encodeURIComponent(username)}`;
-
-                        // ── Public tracker embed (sent for every roll) ───────
-                        publicEmbeds.push(
-                            new EmbedBuilder()
-                                .setDescription(
-                                    `🌍 **Public Global Roll**\n` +
-                                    `**${displayName}** • [${username}](${publicProfileURL})\n` +
-                                    `**${aura}** — 1 in ${chanceStr}${isBT ? '  🔥 **BREAKTHROUGH!**' : ''}\n` +
-                                    `Rolls: ${rollsVal}\n` +
-                                    `Luck: ${luckVal}`
-                                )
-                                .setTimestamp()
-                                .setColor(embedColor ?? (isBT ? colors.error : colors.none))
-                        );
-
-                        // ── Linked tracker embed (tracked users only) ────────
-                        if (tracked) {
-                            console.log(`Tracked match: ${displayName} (@${username}, ID: ${tracked.id}) found ${aura}`);
-                            linkedEmbeds.push(
-                                new EmbedBuilder()
-                                    .setDescription(
-                                        `✅ **Successfully tracked ${displayName} (${username} • ID: ${tracked.id})!**\n` +
-                                        `**${aura}** — 1 in ${chanceStr}${isBT ? '  🔥 **BREAKTHROUGH!**' : ''}\n` +
-                                        `Rolls: ${rollsVal}\n` +
-                                        `Luck: ${luckVal}\n` +
-                                        `[View Roblox Profile](${trackedProfileURL})`
-                                    )
-                                    .setTimestamp()
-                                    .setColor(embedColor ?? (isBT ? colors.error : colors.success))
-                            );
-                        }
-                    }
-
-                    // Discord allows max 10 embeds per message — send in batches.
-                    // If the packet carried its own embed layout, append those to the public
-                    // channel payload so the original Sol's Stat Tracker layout is preserved.
-                    const sendBatched = (client, embeds, passthroughEmbeds, label) => {
-                        const all = [...embeds, ...passthroughEmbeds];
-                        for (let i = 0; i < all.length; i += 10) {
-                            client.send({
-                                username: overrideUsername ?? payload.username,
-                                avatarURL: overrideAvatarURL ?? payload.avatarURL,
-                                allowedMentions: { parse: [] },
-                                embeds: all.slice(i, i + 10)
-                            }).catch(err => console.error(`${label} send error: ${err.message}`));
-                        }
-                    };
-
-                    if (publicEmbeds.length > 0) sendBatched(publicWebhookClient, publicEmbeds, rawEmbeds, 'Public');
-                    if (linkedEmbeds.length > 0) sendBatched(linkedWebhookClient, linkedEmbeds, [], 'Linked');
-
-                    console.log(`Packet processed: ${publicEmbeds.length} public roll(s), ${linkedEmbeds.length} linked match(es).`);
+        for (const [, entry] of Object.entries(customAuras)) {
+            if (lineLower.includes(entry.phrase)) {
+                const boldMatch = line.match(/\*\*(?:(.+?)\(@(.+?)\)|@(\S+?))\*\*/);
+                if (!boldMatch) {
+                    console.log(`Custom aura line missing bold username (skipping): ${line.slice(0, 80)}`);
                     break;
+                }
+                username    = boldMatch[2] || boldMatch[3];
+                displayName = boldMatch[1] || `@${username}`;
+                aura        = entry.name;
+                chanceStr   = entry.chance;
+                embedColor  = entry.color;
+                customMatched = true;
+                console.log(`Custom aura detected: ${aura} for ${username}`);
+                break;
+            }
+        }
+
+        if (!customMatched) {
+            const m = line.match(
+                /\*\*(?:(.+?)\(@(.+?)\)|@(\S+?))\*\*.*?(?:HAS FOUND|has found)\s+\*\*(.+?)\*\*.*?(?:CHANCE OF|chance of)\s+\*\*1 IN ([\d,]+)/i
+            );
+            if (!m) {
+                console.log(`Unparseable line (skipping): ${line.slice(0, 80)}`);
+                continue;
+            }
+            username    = m[2] || m[3];
+            displayName = m[1] || `@${username}`;
+            aura        = m[4];
+            chanceStr   = m[5];
+            embedColor  = null;
+        }
+
+        const isBT = lineLower.includes('breakthrough');
+        const key = username.toLowerCase();
+        const tracked = trackedRobloxUsers.get(key);
+
+        if (!tracked) continue;
+
+        const embedForLine = rawEmbeds[lineIdx];
+        const rollsVal =
+            embedForLine?.fields?.find(f => /rolls?/i.test(f.name))?.value
+            ?? payload.rolls
+            ?? payload.player?.rolls
+            ?? 'N/A';
+        const luckVal =
+            embedForLine?.fields?.find(f => /luck/i.test(f.name))?.value
+            ?? payload.luck
+            ?? payload.player?.luck
+            ?? 'N/A';
+
+        totalRollsProcessed++;
+
+        const trackedProfileURL = `https://www.roblox.com/users/${tracked.id}/profile`;
+
+        console.log(`Tracked match: ${displayName} (@${username}, ID: ${tracked.id}) found ${aura}`);
+        linkedEmbeds.push(
+            new EmbedBuilder()
+                .setDescription(
+                    `✅ **Successfully tracked ${displayName} (${username} • ID: ${tracked.id})!**\n` +
+                    `**${aura}** — 1 in ${chanceStr}${isBT ? '  🔥 **BREAKTHROUGH!**' : ''}\n` +
+                    `Rolls: ${rollsVal}\n` +
+                    `Luck: ${luckVal}\n` +
+                    `[View Roblox Profile](${trackedProfileURL})`
+                )
+                .setTimestamp()
+                .setColor(embedColor ?? (isBT ? colors.error : colors.success))
+        );
+    }
+
+    if (linkedEmbeds.length > 0) {
+        for (let i = 0; i < linkedEmbeds.length; i += 10) {
+            linkedWebhookClient.send({
+                username: overrideUsername ?? payload.username,
+                avatarURL: overrideAvatarURL ?? payload.avatarURL,
+                allowedMentions: { parse: [] },
+                embeds: linkedEmbeds.slice(i, i + 10)
+            }).catch(err => console.error(`Linked send error: ${err.message}`));
+        }
+    }
+
+    console.log(`Packet processed: linked ${linkedEmbeds.length} tracked match(es).`);
+    break;
+}
                 }
 
                 default:
