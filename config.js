@@ -1,6 +1,6 @@
 const config = {
     // AUTHENTICATION (REQUIRED)
-    "token": "jugf1DxL8#PBaUy2zeG1a5hcVzhoSBJpDBOZmuOrXte7MW2iCjsI#iJp0Kq^k9D$wZu$X!LJruYtuDNJry3Ho0GnZ6TjYMGHvhcRprMqY9JSWqDvcKlgXnWiDvx5wNrw",
+    "token": "zva$f3O0^Dv&GVF&88F&jDUzy9kdD@RorwiXZvZOFJ@9t7@b3&2RUn0XkRdv&lU#Iwsem4U^y4DYOsGYe$ZjxD$c7oH8hmHH@PdJZa2qEL2PUuUN@qChJ2GQXj*oleUE",
     "webhookURL": "https://discord.com/api/webhooks/1504121127281098823/jt64o3iRBH36DY0jCyTvQkQYCTQOz_MFlWs5hEOgg6cYnvEy61EcXcxsLcu2e1r7hewL",
 
     // COMMAND CHANNEL — only !linked / !unlinked commands from this channel are accepted
