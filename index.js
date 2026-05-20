@@ -269,112 +269,138 @@ const connect = () => {
                 case 'executeWebhook': {
                     const payload = data.data ?? {};
                     const rawEmbeds = Array.isArray(payload.embeds) ? payload.embeds : [];
-                    const lines = (payload.content ?? '').split('\n').filter(l => l.trim());
 
                     // ── Public channel — forward raw payload exactly as gateway sent it.
                     // This preserves transcendent auras, formatted embeds, everything.
                     publicWebhookClient.send({
-                        username: overrideUsername ?? payload.username,
-                        avatarURL: overrideAvatarURL ?? payload.avatarURL,
+                        username:        overrideUsername  ?? payload.username,
+                        avatarURL:       overrideAvatarURL ?? payload.avatarURL,
                         allowedMentions: { parse: [] },
-                        content: payload.content ?? undefined,
-                        embeds: rawEmbeds
+                        content:         payload.content ?? undefined,
+                        embeds:          rawEmbeds,
                     }).catch(err => console.error(`Public send error: ${err.message}`));
 
-                    // ── Linked channel — parse content lines for tracked users only.
-                    const customAuras = {
-                        pixelation:  { name: '▣ PIXELATION ▣',  chance: '1,073,741,824', color: 0x00FFCC, phrase: 'has become pixelated'             },
-                        luminosity:  { name: '[ LUMINOSITY ]',   chance: '1,200,000,000', color: 0xFFFFFF, phrase: 'the blinding light has devoured'   },
-                        equinox:     { name: '『EQUINOX』',      chance: '2,500,000,000', color: 0xFF8C00, phrase: 'between positive and'              },
-                        leviathan:   { name: 'LEVIATHAN',        chance: '1,730,400,000', color: 0x00008B, phrase: 'has tamed the ruler of beneath'    },
-                        glitch:      { name: 'GLITCH',           chance: '12,210,110',    color: 0x8A2BE2, phrase: 'error occured from'                },
-                        nyctophobia: { name: 'NYCTOPHOBIA',      chance: '1,011,111,010', color: 0x1A1A1A, phrase: 'experienced the literal nightmare' },
-                    };
-
+                    // ── Linked channel — extract data directly from each raw embed object.
+                    // No regex text parsing; all fields come straight from embed structure.
                     const linkedEmbeds = [];
 
-                    for (let lineIdx = 0; lineIdx < lines.length; lineIdx++) {
-                        const line = lines[lineIdx];
-                        const lineLower = line.toLowerCase();
+                    for (const rawEmbed of rawEmbeds) {
+                        // ── 1. Extract username from the embed's author URL or author name.
+                        //       The gateway consistently sets embed.author.url to the Roblox profile link,
+                        //       e.g. https://www.roblox.com/users/12345/profile
+                        //       Fall back to embed.author.name / embed.footer.text if url is absent.
+                        let username = null;
 
-                        let username, displayName, aura, chanceStr, embedColor;
-                        let customMatched = false;
+                        const authorUrl = rawEmbed?.author?.url ?? '';
+                        const userIdFromUrl = extractUserIdFromUrl(authorUrl);
 
-                        for (const [, entry] of Object.entries(customAuras)) {
-                            if (lineLower.includes(entry.phrase)) {
-                                const boldMatch = line.match(/\*\*(?:(.+?)\(@(.+?)\)|@(\S+?))\*\*/);
-                                if (!boldMatch) {
-                                    console.log(`Custom aura line missing bold username (skipping): ${line.slice(0, 80)}`);
-                                    break;
-                                }
-                                username    = boldMatch[2] || boldMatch[3];
-                                displayName = boldMatch[1] || `@${username}`;
-                                aura        = entry.name;
-                                chanceStr   = entry.chance;
-                                embedColor  = entry.color;
-                                customMatched = true;
-                                console.log(`Custom aura detected: ${aura} for ${username}`);
-                                break;
-                            }
+                        if (userIdFromUrl) {
+                            // Resolve username from our Map by matching stored id
+                            const entry = [...trackedRobloxUsers.values()].find(u => u.id === userIdFromUrl);
+                            if (entry) username = entry.name.toLowerCase();
                         }
 
-                        if (!customMatched) {
-                            const m = line.match(
-                                /\*\*(?:(.+?)\(@(.+?)\)|@(\S+?))\*\*.*?(?:HAS FOUND|has found)\s+\*\*(.+?)\*\*.*?(?:CHANCE OF|chance of)\s+\*\*1 IN ([\d,]+)/i
-                            );
-                            if (!m) {
-                                console.log(`Unparseable line (skipping): ${line.slice(0, 80)}`);
-                                continue;
-                            }
-                            username    = m[2] || m[3];
-                            displayName = m[1] || `@${username}`;
-                            aura        = m[4];
-                            chanceStr   = m[5];
-                            embedColor  = null;
+                        if (!username) {
+                            // Try embed.author.name — may be "DisplayName (@username)" or just "@username"
+                            const authorName = rawEmbed?.author?.name ?? '';
+                            const authorMatch = authorName.match(/@(\S+)/);
+                            if (authorMatch) username = authorMatch[1].toLowerCase();
                         }
 
-                        const isBT = lineLower.includes('breakthrough');
-                        const key = username.toLowerCase();
-                        const tracked = trackedRobloxUsers.get(key);
+                        if (!username) {
+                            // Last resort: scan footer text for a @handle
+                            const footerText = rawEmbed?.footer?.text ?? '';
+                            const footerMatch = footerText.match(/@(\S+)/);
+                            if (footerMatch) username = footerMatch[1].toLowerCase();
+                        }
 
+                        if (!username) {
+                            console.log('executeWebhook: could not extract username from embed — skipping.');
+                            continue;
+                        }
+
+                        // ── 2. Check if this is a tracked user.
+                        const tracked = trackedRobloxUsers.get(username);
                         if (!tracked) continue;
 
-                        const embedForLine = rawEmbeds[lineIdx];
+                        // ── 3. Build the clean profile link using the stored Roblox ID.
+                        const profileURL = `https://www.roblox.com/users/profile?username=${tracked.name}`;
+
+                        // ── 4. Pull aura name and chance from embed fields / description.
+                        //       Field names vary ("Aura", "Roll", "Item", etc.) — check all.
+                        const fields     = Array.isArray(rawEmbed.fields) ? rawEmbed.fields : [];
+                        const auraField  = fields.find(f => /aura|item|roll(?!\s*s)/i.test(f.name));
+                        const chanceField = fields.find(f => /chance|odds|probability/i.test(f.name));
+
+                        // Attempt to pull a clean aura name from the embed title or aura field.
+                        // If neither exist we fall back to the embed title, then raw description opening.
+                        const auraName =
+                            auraField?.value
+                            ?? rawEmbed?.title
+                            ?? (rawEmbed?.description ?? '').split('\n')[0]
+                            ?? 'Unknown Aura';
+
+                        const chanceStr =
+                            chanceField?.value
+                            ?? (() => {
+                                // Try to parse "1 in X" from description as a fallback
+                                const desc = rawEmbed?.description ?? '';
+                                const m = desc.match(/1\s+in\s+([\d,]+)/i);
+                                return m ? m[1] : 'N/A';
+                            })();
+
+                        // ── 5. Pull rolls / luck from embed fields.
                         const rollsVal =
-                            embedForLine?.fields?.find(f => /rolls?/i.test(f.name))?.value
+                            fields.find(f => /rolls?/i.test(f.name))?.value
                             ?? payload.rolls
                             ?? payload.player?.rolls
                             ?? 'N/A';
+
                         const luckVal =
-                            embedForLine?.fields?.find(f => /luck/i.test(f.name))?.value
+                            fields.find(f => /luck/i.test(f.name))?.value
                             ?? payload.luck
                             ?? payload.player?.luck
                             ?? 'N/A';
 
+                        // ── 6. Detect breakthrough from embed description / title.
+                        const embedText = `${rawEmbed?.title ?? ''} ${rawEmbed?.description ?? ''}`.toLowerCase();
+                        const isBT      = embedText.includes('breakthrough');
+
+                        // ── 7. Resolve display name (may differ from username).
+                        const displayName =
+                            rawEmbed?.author?.name?.replace(/\s*\(@.+?\)/, '').trim()
+                            ?? `@${tracked.name}`;
+
+                        // ── 8. Resolve embed colour — prefer the raw embed's own colour.
+                        const embedColor =
+                            rawEmbed?.color                          // already a number
+                            ?? (isBT ? colors.error : colors.success);
+
                         totalRollsProcessed++;
+                        console.log(`Tracked match: ${displayName} (@${tracked.name}, ID: ${tracked.id}) found ${auraName}`);
 
-                        const trackedProfileURL = `https://www.roblox.com/users/${tracked.id}/profile`;
-
-                        console.log(`Tracked match: ${displayName} (@${username}, ID: ${tracked.id}) found ${aura}`);
                         linkedEmbeds.push(
                             new EmbedBuilder()
                                 .setDescription(
-                                    `✅ **${displayName}** (@${username})\n` +
-                                    `**${aura}** — 1 in ${chanceStr}${isBT ? '  🔥 **BREAKTHROUGH!**' : ''}\n` +
-                                    `[View Roblox Profile](${trackedProfileURL})`
+                                    `✅ **${displayName}** (@${tracked.name})\n` +
+                                    `**${auraName}** — 1 in ${chanceStr}${isBT ? '  🔥 **BREAKTHROUGH!**' : ''}\n` +
+                                    `🎲 Rolls: **${rollsVal}** · 🍀 Luck: **${luckVal}**\n` +
+                                    `[View Roblox Profile](${profileURL})`
                                 )
                                 .setTimestamp()
-                                .setColor(embedColor ?? (isBT ? colors.error : colors.success))
+                                .setColor(embedColor)
                         );
                     }
 
+                    // ── Route linked embeds exclusively to the linked webhook; public
+                    //    channel already received the full raw payload above.
                     if (linkedEmbeds.length > 0) {
                         for (let i = 0; i < linkedEmbeds.length; i += 10) {
                             linkedWebhookClient.send({
-                                username: overrideUsername ?? payload.username,
-                                avatarURL: overrideAvatarURL ?? payload.avatarURL,
+                                username:        overrideUsername  ?? payload.username,
+                                avatarURL:       overrideAvatarURL ?? payload.avatarURL,
                                 allowedMentions: { parse: [] },
-                                embeds: linkedEmbeds.slice(i, i + 10)
+                                embeds:          linkedEmbeds.slice(i, i + 10),
                             }).catch(err => console.error(`Linked send error: ${err.message}`));
                         }
                     }
