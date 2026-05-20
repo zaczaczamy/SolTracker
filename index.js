@@ -178,6 +178,53 @@ bot.on(Events.MessageCreate, async (message) => {
         );
         return;
     }
+
+    // !preview [RobloxUsername]
+    // Sends a sample linked-channel embed to the linked webhook so you can
+    // verify the exact format before a real roll comes in.
+    const previewMatch = content.match(/^!preview\s+(\S+)$/i);
+    if (previewMatch) {
+        const key = previewMatch[1].toLowerCase();
+        const tracked = trackedRobloxUsers.get(key);
+        if (!tracked) {
+            message.reply(`**${previewMatch[1]}** is not in the tracked list. Use \`!link\` first.`);
+            return;
+        }
+
+        const profileURL = `https://www.roblox.com/users/profile?username=${tracked.name}`;
+
+        const previewEmbed = new EmbedBuilder()
+            .setTitle('▣ PREVIEW AURA ▣')
+            .setURL(profileURL)
+            .setDescription(
+                `**${tracked.name}** rolled an aura!\n` +
+                `\n*(This is a preview — sample data only)*\n` +
+                `\n[View Roblox Profile](${profileURL})`
+            )
+            .addFields(
+                { name: 'Rolls',    value: '12,345',        inline: true },
+                { name: 'Luck',     value: '2x',            inline: true },
+                { name: 'Username', value: `@${tracked.name}`, inline: true }
+            )
+            .setColor(colors.success)
+            .setFooter({ text: `Roblox ID: ${tracked.id}` })
+            .setTimestamp();
+
+        try {
+            await linkedWebhookClient.send({
+                username: overrideUsername,
+                avatarURL: overrideAvatarURL,
+                allowedMentions: { parse: [] },
+                embeds: [previewEmbed]
+            });
+            message.reply(`Preview sent to the linked channel for **${tracked.name}**.`);
+            console.log(`Preview embed sent for tracked user: ${tracked.name} (ID: ${tracked.id})`);
+        } catch (err) {
+            console.error(`Preview send failed: ${err.message}`);
+            message.reply(`Failed to send preview: ${err.message}`);
+        }
+        return;
+    }
 });
 
 // ── Webhook clients ───────────────────────────────────────────────────────────
@@ -210,10 +257,73 @@ process.on('SIGTERM', shutdown);
 process.on('SIGINT', shutdown);
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
-const extractUserIdFromUrl = (url) => {
-    if (!url) return null;
-    const match = url.match(/\/users\/(\d+)\/profile/);
-    return match ? parseInt(match[1], 10) : null;
+
+/**
+ * Extracts the Roblox username directly from a Discord embed object.
+ *
+ * Priority order:
+ *  1. embed.author.name  — e.g. "DisplayName (@Username)" or "@Username" or "Username"
+ *  2. embed.author.url   — e.g. https://www.roblox.com/users/profile?username=Username
+ *  3. embed.url          — same format as above
+ *  4. embed.description  — bold mention pattern: **DisplayName (@Username)** or **@Username**
+ *  5. embed.fields       — a field whose name is "player", "user", or "username"
+ *
+ * Returns the raw username string, or null if nothing was found.
+ */
+const extractUsernameFromEmbed = (embed) => {
+    // Diagnostic snapshot — logged on every call so you can verify the real
+    // gateway payload structure on first live use without guessing.
+    console.log('[embed fields] title:', embed.title ?? '(none)');
+    console.log('[embed fields] author.name:', embed.author?.name ?? '(none)');
+    console.log('[embed fields] author.url:', embed.author?.url ?? '(none)');
+    console.log('[embed fields] embed.url:', embed.url ?? '(none)');
+    console.log('[embed fields] description (first 80 chars):', (embed.description ?? '(none)').slice(0, 80));
+    console.log('[embed fields] field names:', (embed.fields ?? []).map(f => f.name).join(', ') || '(none)');
+
+    // 1. author.name — "DisplayName (@Username)", "@Username", or plain "Username"
+    if (embed.author?.name) {
+        const parenMatch = embed.author.name.match(/\(@?([A-Za-z0-9_]+)\)\s*$/);
+        if (parenMatch) { console.log('[username source] author.name (paren):', parenMatch[1]); return parenMatch[1]; }
+        const atMatch = embed.author.name.match(/^@([A-Za-z0-9_]+)/);
+        if (atMatch) { console.log('[username source] author.name (@prefix):', atMatch[1]); return atMatch[1]; }
+        const plainMatch = embed.author.name.match(/^([A-Za-z0-9_]{3,20})$/);
+        if (plainMatch) { console.log('[username source] author.name (plain):', plainMatch[1]); return plainMatch[1]; }
+        console.log('[username source] author.name present but no pattern matched:', embed.author.name);
+    }
+
+    // 2. author.url — ?username=Username query param
+    if (embed.author?.url) {
+        const urlMatch = embed.author.url.match(/[?&]username=([^&\s]+)/i);
+        if (urlMatch) { console.log('[username source] author.url query param:', urlMatch[1]); return decodeURIComponent(urlMatch[1]); }
+        console.log('[username source] author.url present but no ?username= param:', embed.author.url);
+    }
+
+    // 3. embed.url — same format
+    if (embed.url) {
+        const urlMatch = embed.url.match(/[?&]username=([^&\s]+)/i);
+        if (urlMatch) { console.log('[username source] embed.url query param:', urlMatch[1]); return decodeURIComponent(urlMatch[1]); }
+        console.log('[username source] embed.url present but no ?username= param:', embed.url);
+    }
+
+    // 4. embed.description — bold username mention patterns
+    if (embed.description) {
+        const m = embed.description.match(/\*\*(?:[^*]+?\(@?([A-Za-z0-9_]+)\)|@([A-Za-z0-9_]+))\*\*/);
+        if (m) { const u = m[1] ?? m[2]; console.log('[username source] description bold pattern:', u); return u; }
+        console.log('[username source] description present but bold pattern did not match');
+    }
+
+    // 5. A field explicitly named "player", "user", or "username"
+    if (Array.isArray(embed.fields)) {
+        const playerField = embed.fields.find(f => /^(player|user|username)$/i.test(f.name));
+        if (playerField?.value) {
+            const u = playerField.value.replace(/^@/, '').trim();
+            console.log('[username source] named field "' + playerField.name + '":', u);
+            return u;
+        }
+    }
+
+    console.log('[username source] FAILED — no username found in embed. Full embed dump:', JSON.stringify(embed));
+    return null;
 };
 
 // ── Gateway connection ────────────────────────────────────────────────────────
@@ -270,141 +380,91 @@ const connect = () => {
                     const payload = data.data ?? {};
                     const rawEmbeds = Array.isArray(payload.embeds) ? payload.embeds : [];
 
-                    // ── Helper: extract username key from a single raw embed (3-tier fallback).
-                    const extractUsernameFromEmbed = (rawEmbed) => {
-                        // Tier 1 — author.url contains the numeric Roblox user ID
-                        const authorUrl = rawEmbed?.author?.url ?? '';
-                        const userIdFromUrl = extractUserIdFromUrl(authorUrl);
-                        if (userIdFromUrl) {
-                            const entry = [...trackedRobloxUsers.values()].find(u => u.id === userIdFromUrl);
-                            if (entry) return entry.name.toLowerCase();
-                        }
-
-                        // Tier 2 — author.name contains "@username" or "DisplayName (@username)"
-                        const authorMatch = (rawEmbed?.author?.name ?? '').match(/@(\S+)/);
-                        if (authorMatch) return authorMatch[1].toLowerCase();
-
-                        // Tier 3 — footer.text contains "@username"
-                        const footerMatch = (rawEmbed?.footer?.text ?? '').match(/@(\S+)/);
-                        if (footerMatch) return footerMatch[1].toLowerCase();
-
-                        return null;
-                    };
-
-                    // ── Pass 1: resolve every embed to its tracked entry (or null).
-                    //    We do this before sending anywhere so both channels use the same
-                    //    resolved data and the profile link is consistent everywhere.
-                    const resolvedEmbeds = rawEmbeds.map((rawEmbed) => {
-                        const username = extractUsernameFromEmbed(rawEmbed);
-                        if (!username) return { rawEmbed, tracked: null, profileURL: null };
-
-                        const tracked = trackedRobloxUsers.get(username) ?? null;
-                        const profileURL = tracked
-                            ? `https://www.roblox.com/users/profile?username=${tracked.name}`
-                            : null;
-
-                        return { rawEmbed, tracked, profileURL };
-                    });
-
-                    // ── Pass 2: build the public embeds array.
-                    //    For untracked rolls the raw embed is forwarded untouched.
-                    //    For tracked rolls the profile link is appended to the description
-                    //    so viewers on the public channel can click straight through.
-                    const publicEmbeds = resolvedEmbeds.map(({ rawEmbed, tracked, profileURL }) => {
-                        if (!tracked) return rawEmbed; // untracked — zero modification
-
-                        // Shallow-clone the raw embed object and append the profile link.
-                        // We avoid mutating the original in case it is referenced elsewhere.
-                        const desc = rawEmbed.description ?? '';
-                        return {
-                            ...rawEmbed,
-                            description: desc
-                                ? `${desc}\n[View Roblox Profile](${profileURL})`
-                                : `[View Roblox Profile](${profileURL})`,
-                        };
-                    });
-
-                    // ── Public channel send (always fires, every roll).
+                    // ── Public channel — forward the entire raw payload exactly as the
+                    // gateway sent it. Preserves transcendental auras, formatted embeds,
+                    // custom fields, colours — everything. No transformation applied.
                     publicWebhookClient.send({
-                        username:        overrideUsername  ?? payload.username,
-                        avatarURL:       overrideAvatarURL ?? payload.avatarURL,
+                        username: overrideUsername ?? payload.username,
+                        avatarURL: overrideAvatarURL ?? payload.avatarURL,
                         allowedMentions: { parse: [] },
-                        content:         payload.content ?? undefined,
-                        embeds:          publicEmbeds,
+                        content: payload.content ?? undefined,
+                        embeds: rawEmbeds
                     }).catch(err => console.error(`Public send error: ${err.message}`));
 
-                    // ── Pass 3: build linked embeds — only for tracked users.
+                    // ── Linked channel — one clean custom embed per tracked user.
+                    // Username is extracted directly from the embed object (no regex
+                    // against content lines). Each match produces exactly one new embed
+                    // sent only to the linked channel; the public channel is not
+                    // double-notified.
                     const linkedEmbeds = [];
 
-                    for (const { rawEmbed, tracked, profileURL } of resolvedEmbeds) {
+                    for (const embed of rawEmbeds) {
+                        // Step 1 — pull the username straight out of the embed object
+                        const username = extractUsernameFromEmbed(embed);
+
+                        if (!username) {
+                            console.log('Could not extract username from embed — skipping.');
+                            continue;
+                        }
+
+                        // Step 2 — check the trackedRobloxUsers Map (lowercase key)
+                        const key = username.toLowerCase();
+                        const tracked = trackedRobloxUsers.get(key);
+
                         if (!tracked) continue;
 
-                        const fields      = Array.isArray(rawEmbed.fields) ? rawEmbed.fields : [];
-                        const auraField   = fields.find(f => /aura|item|roll(?!\s*s)/i.test(f.name));
-                        const chanceField = fields.find(f => /chance|odds|probability/i.test(f.name));
+                        // Step 3 — build the standard Roblox profile link by username
+                        const profileURL = `https://www.roblox.com/users/profile?username=${username}`;
 
-                        const auraName =
-                            auraField?.value
-                            ?? rawEmbed?.title
-                            ?? (rawEmbed?.description ?? '').split('\n')[0]
+                        // Step 4 — pull aura info and stats directly from the embed fields
+                        const auraName = embed.title
+                            ?? embed.description?.match(/\*\*(.+?)\*\*/)?.[1]
                             ?? 'Unknown Aura';
-
-                        const chanceStr =
-                            chanceField?.value
-                            ?? (() => {
-                                const m = (rawEmbed?.description ?? '').match(/1\s+in\s+([\d,]+)/i);
-                                return m ? m[1] : 'N/A';
-                            })();
-
-                        const rollsVal =
-                            fields.find(f => /rolls?/i.test(f.name))?.value
-                            ?? payload.rolls
-                            ?? payload.player?.rolls
-                            ?? 'N/A';
-
-                        const luckVal =
-                            fields.find(f => /luck/i.test(f.name))?.value
-                            ?? payload.luck
-                            ?? payload.player?.luck
-                            ?? 'N/A';
-
-                        const embedText  = `${rawEmbed?.title ?? ''} ${rawEmbed?.description ?? ''}`.toLowerCase();
-                        const isBT       = embedText.includes('breakthrough');
-
-                        const displayName =
-                            rawEmbed?.author?.name?.replace(/\s*\(@.+?\)/, '').trim()
-                            ?? `@${tracked.name}`;
-
-                        const embedColor =
-                            rawEmbed?.color
-                            ?? (isBT ? colors.error : colors.success);
+                        const auraDesc = embed.description ?? null;
+                        const rollsVal = embed.fields?.find(f => /rolls?/i.test(f.name))?.value ?? 'N/A';
+                        const luckVal  = embed.fields?.find(f => /luck/i.test(f.name))?.value  ?? 'N/A';
+                        const embedColor = embed.color ?? colors.success;
+                        const thumbnailURL = embed.thumbnail?.url ?? embed.image?.url ?? null;
 
                         totalRollsProcessed++;
-                        console.log(`Tracked match: ${displayName} (@${tracked.name}, ID: ${tracked.id}) found ${auraName}`);
 
-                        linkedEmbeds.push(
-                            new EmbedBuilder()
-                                .setDescription(
-                                    `✅ **${displayName}** (@${tracked.name})\n` +
-                                    `**${auraName}** — 1 in ${chanceStr}${isBT ? '  🔥 **BREAKTHROUGH!**' : ''}\n` +
-                                    `🎲 Rolls: **${rollsVal}** · 🍀 Luck: **${luckVal}**\n` +
-                                    `[View Roblox Profile](${profileURL})`
-                                )
-                                .setTimestamp()
-                                .setColor(embedColor)
+                        console.log(
+                            `Tracked match: ${username} (ID: ${tracked.id}) | Aura: ${auraName} | ` +
+                            `Rolls: ${rollsVal} | Luck: ${luckVal} | Profile: ${profileURL}`
                         );
+
+                        // Step 5 — build a single clean embed for this user with all
+                        // relevant data. One embed per tracked roll; no bulk forwarding.
+                        const customEmbed = new EmbedBuilder()
+                            .setTitle(auraName)
+                            .setURL(profileURL)
+                            .setDescription(
+                                `**${tracked.name}** rolled an aura!\n` +
+                                (auraDesc ? `\n${auraDesc}\n` : '') +
+                                `\n[View Roblox Profile](${profileURL})`
+                            )
+                            .addFields(
+                                { name: 'Rolls',    value: String(rollsVal), inline: true },
+                                { name: 'Luck',     value: String(luckVal),  inline: true },
+                                { name: 'Username', value: `@${username}`,   inline: true }
+                            )
+                            .setColor(embedColor)
+                            .setTimestamp();
+
+                        if (thumbnailURL) customEmbed.setThumbnail(thumbnailURL);
+
+                        linkedEmbeds.push(customEmbed);
                     }
 
-                    // ── Linked channel send (only fires when tracked users matched).
-                    if (linkedEmbeds.length > 0) {
-                        for (let i = 0; i < linkedEmbeds.length; i += 10) {
-                            linkedWebhookClient.send({
-                                username:        overrideUsername  ?? payload.username,
-                                avatarURL:       overrideAvatarURL ?? payload.avatarURL,
-                                allowedMentions: { parse: [] },
-                                embeds:          linkedEmbeds.slice(i, i + 10),
-                            }).catch(err => console.error(`Linked send error: ${err.message}`));
-                        }
+                    // Send each tracked-user embed individually so the linked channel
+                    // never receives a bulk pile of unrelated rolls (Discord limit: 10).
+                    for (const linkedEmbed of linkedEmbeds) {
+                        linkedWebhookClient.send({
+                            username: overrideUsername ?? payload.username,
+                            avatarURL: overrideAvatarURL ?? payload.avatarURL,
+                            allowedMentions: { parse: [] },
+                            embeds: [linkedEmbed]
+                        }).catch(err => console.error(`Linked send error: ${err.message}`));
                     }
 
                     console.log(`Packet processed: ${linkedEmbeds.length} linked match(es).`);
