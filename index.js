@@ -8,7 +8,7 @@ const PORT = process.env.PORT || 3000;
 
 app.get('/', (req, res) => res.send('Tracker is Active'));
 
-app.listen(PORT, "0.0.0.0", () => {
+app.listen(PORT, () => {
     console.log(`Uptime server listening on port ${PORT}`);
 });
 
@@ -275,27 +275,81 @@ const connect = () => {
                     // The gateway sends rolls as newline-separated plain text in `content`
                     const lines = (payload.content ?? '').split('\n').filter(l => l.trim());
 
+                    // ── Custom global aura map ────────────────────────────────
+                    // These auras omit "has found" / "chance of" entirely, so the
+                    // standard regex cannot parse them. Each entry lists a unique
+                    // phrase substring (lowercase) that identifies the aura, plus
+                    // the display metadata to use instead of regex capture groups.
+                    const customAuras = {
+                        "pixelated": { name: "▣ PIXELATION ▣",   chance: "1,073,741,824", color: 0x00FFCC, phrase: "has become pixelated"               },
+                        "luminosity": { name: "[ LUMINOSITY ]",   chance: "1,200,000,000", color: 0xFFFFFF, phrase: "the blinding light has devoured"     },
+                        "equinox":    { name: "『EQUINOX』",      chance: "2,500,000,000", color: 0xFF8C00, phrase: "has found the [???????] between positive and **negative**" },
+                        "leviathan":  { name: "LEVIATHAN",        chance: "1,730,400,000", color: 0x00008B, phrase: "has tamed the ruler of beneath"      },
+                        "glitch":     { name: "GLITCH",           chance: "12,210,110",    color: 0x8A2BE2, phrase: "error occurred from"                 },
+                        "nyctophobia":{ name: "NYCTOPHOBIA",      chance: "1,011,111,010", color: 0x1A1A1A, phrase: "experienced the literal nightmare"   },
+                    };
+
                     const publicEmbeds = [];
                     const linkedEmbeds = [];
 
                     for (let lineIdx = 0; lineIdx < lines.length; lineIdx++) {
                         const line = lines[lineIdx];
-                        // Handles two formats from the gateway:
-                        //   Format A: **DisplayName(@username)** HAS FOUND **Aura**, CHANCE OF **1 IN X**
-                        //   Format B: **@username** HAS FOUND **Aura**, CHANCE OF **1 IN X**  (no display name)
-                        const m = line.match(
-                            /\*\*(?:(.+?)\(@(.+?)\)|@(\S+?))\*\*.*?(?:HAS FOUND|has found)\s+\*\*(.+?)\*\*.*?(?:CHANCE OF|chance of)\s+\*\*1 IN ([\d,]+)/i
-                        );
-                        if (!m) {
-                            console.log(`Unparseable line (skipping): ${line.slice(0, 80)}`);
-                            continue;
+                        const lineLower = line.toLowerCase();
+
+                        // ── Custom aura detection (bypasses standard regex) ──
+                        // Check each custom phrase before falling through to the
+                        // normal "has found / chance of" regex, so these messages
+                        // are never silently dropped.
+                        let username, displayName, aura, chanceStr, embedColor;
+                        let customMatched = false;
+
+                        for (const [, entry] of Object.entries(customAuras)) {
+                            if (lineLower.includes(entry.phrase)) {
+                                // Extract the username from the first **bold** run in the line.
+                                // Custom globals format the player name as **Username** or
+                                // **DisplayName(@Username)** — we grab whatever is in the
+                                // first pair of ** ** and treat it as both display name and
+                                // lookup key (stripping a leading @ if present).
+                                const boldMatch = line.match(/\*\*(.+?)\*\*/);
+                                if (!boldMatch) {
+                                    console.log(`Custom aura line missing bold username (skipping): ${line.slice(0, 80)}`);
+                                    break;
+                                }
+
+                                const rawBold = boldMatch[1]; // e.g. "PlayerName" or "@PlayerName"
+                                username    = rawBold.replace(/^@/, '');
+                                displayName = rawBold.startsWith('@') ? rawBold : `@${username}`;
+                                aura        = entry.name;
+                                chanceStr   = entry.chance;
+                                embedColor  = entry.color;
+                                customMatched = true;
+
+                                console.log(`Custom aura detected: ${aura} for ${username}`);
+                                break;
+                            }
                         }
 
-                        const username = m[2] || m[3];
-                        const displayName = m[1] || `@${username}`;
-                        const aura = m[4];
-                        const chanceStr = m[5];
-                        const isBT = line.toLowerCase().includes('breakthrough');
+                        if (!customMatched) {
+                            // ── Standard regex path ──────────────────────────
+                            // Handles two formats from the gateway:
+                            //   Format A: **DisplayName(@username)** HAS FOUND **Aura**, CHANCE OF **1 IN X**
+                            //   Format B: **@username** HAS FOUND **Aura**, CHANCE OF **1 IN X**  (no display name)
+                            const m = line.match(
+                                /\*\*(?:(.+?)\(@(.+?)\)|@(\S+?))\*\*.*?(?:HAS FOUND|has found)\s+\*\*(.+?)\*\*.*?(?:CHANCE OF|chance of)\s+\*\*1 IN ([\d,]+)/i
+                            );
+                            if (!m) {
+                                console.log(`Unparseable line (skipping): ${line.slice(0, 80)}`);
+                                continue;
+                            }
+
+                            username    = m[2] || m[3];
+                            displayName = m[1] || `@${username}`;
+                            aura        = m[4];
+                            chanceStr   = m[5];
+                            embedColor  = null; // will be resolved below via isBT
+                        }
+
+                        const isBT = lineLower.includes('breakthrough');
                         const key = username.toLowerCase();
                         const tracked = trackedRobloxUsers.get(key);
 
@@ -333,7 +387,7 @@ const connect = () => {
                                     `Luck: ${luckVal}`
                                 )
                                 .setTimestamp()
-                                .setColor(isBT ? colors.error : colors.none)
+                                .setColor(embedColor ?? (isBT ? colors.error : colors.none))
                         );
 
                         // ── Linked tracker embed (tracked users only) ────────
@@ -349,7 +403,7 @@ const connect = () => {
                                         `[View Roblox Profile](${trackedProfileURL})`
                                     )
                                     .setTimestamp()
-                                    .setColor(isBT ? colors.error : colors.success)
+                                    .setColor(embedColor ?? (isBT ? colors.error : colors.success))
                             );
                         }
                     }
