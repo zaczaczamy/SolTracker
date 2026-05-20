@@ -359,10 +359,8 @@ const connect = () => {
                         linkedEmbeds.push(
                             new EmbedBuilder()
                                 .setDescription(
-                                    `✅ **Successfully tracked ${displayName} (${username} • ID: ${tracked.id})!**\n` +
+                                    `✅ **${displayName}** (@${username})\n` +
                                     `**${aura}** — 1 in ${chanceStr}${isBT ? '  🔥 **BREAKTHROUGH!**' : ''}\n` +
-                                    `Rolls: ${rollsVal}\n` +
-                                    `Luck: ${luckVal}\n` +
                                     `[View Roblox Profile](${trackedProfileURL})`
                                 )
                                 .setTimestamp()
