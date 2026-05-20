@@ -225,8 +225,6 @@ const connect = () => {
         console.log(`WS client connected: ${gatewayURL}`);
         reconnectInterval = 31_000;
 
-        // Only mark the connection as stable (and reset retry count) after it
-        // has been open for 10 seconds without a 4003 close.
         if (stableConnectionTimer) clearTimeout(stableConnectionTimer);
         stableConnectionTimer = setTimeout(() => {
             if (ws.readyState === ws.OPEN) {
@@ -269,125 +267,122 @@ const connect = () => {
                 }
 
                 case 'executeWebhook': {
-    const payload = data.data ?? {};
-    const rawEmbeds = Array.isArray(payload.embeds) ? payload.embeds : [];
-    const lines = (payload.content ?? '').split('\n').filter(l => l.trim());
+                    const payload = data.data ?? {};
+                    const rawEmbeds = Array.isArray(payload.embeds) ? payload.embeds : [];
+                    const lines = (payload.content ?? '').split('\n').filter(l => l.trim());
 
-    // ── Public channel — forward the raw payload exactly as the gateway sent it.
-    // This preserves everything including transcendent auras, formatted embeds, etc.
-    publicWebhookClient.send({
-        username: overrideUsername ?? payload.username,
-        avatarURL: overrideAvatarURL ?? payload.avatarURL,
-        allowedMentions: { parse: [] },
-        content: payload.content ?? undefined,
-        embeds: rawEmbeds
-    }).catch(err => console.error(`Public send error: ${err.message}`));
+                    // ── Public channel — forward raw payload exactly as gateway sent it.
+                    // This preserves transcendent auras, formatted embeds, everything.
+                    publicWebhookClient.send({
+                        username: overrideUsername ?? payload.username,
+                        avatarURL: overrideAvatarURL ?? payload.avatarURL,
+                        allowedMentions: { parse: [] },
+                        content: payload.content ?? undefined,
+                        embeds: rawEmbeds
+                    }).catch(err => console.error(`Public send error: ${err.message}`));
 
-    // ── Linked channel — parse content lines for tracked users only.
-    // Transcendent auras won't appear here since they aren't in payload.content,
-    // but all standard globals will be filtered correctly.
-    const linkedEmbeds = [];
+                    // ── Linked channel — parse content lines for tracked users only.
+                    const customAuras = {
+                        pixelation:  { name: '▣ PIXELATION ▣',  chance: '1,073,741,824', color: 0x00FFCC, phrase: 'has become pixelated'             },
+                        luminosity:  { name: '[ LUMINOSITY ]',   chance: '1,200,000,000', color: 0xFFFFFF, phrase: 'the blinding light has devoured'   },
+                        equinox:     { name: '『EQUINOX』',      chance: '2,500,000,000', color: 0xFF8C00, phrase: 'between positive and'              },
+                        leviathan:   { name: 'LEVIATHAN',        chance: '1,730,400,000', color: 0x00008B, phrase: 'has tamed the ruler of beneath'    },
+                        glitch:      { name: 'GLITCH',           chance: '12,210,110',    color: 0x8A2BE2, phrase: 'error occured from'                },
+                        nyctophobia: { name: 'NYCTOPHOBIA',      chance: '1,011,111,010', color: 0x1A1A1A, phrase: 'experienced the literal nightmare' },
+                    };
 
-    for (let lineIdx = 0; lineIdx < lines.length; lineIdx++) {
-        const line = lines[lineIdx];
-        const lineLower = line.toLowerCase();
+                    const linkedEmbeds = [];
 
-        let username, displayName, aura, chanceStr, embedColor;
-        let customMatched = false;
+                    for (let lineIdx = 0; lineIdx < lines.length; lineIdx++) {
+                        const line = lines[lineIdx];
+                        const lineLower = line.toLowerCase();
 
-        const customAuras = {
-            "pixelation":  { name: "▣ PIXELATION ▣",  chance: "1,073,741,824", color: 0x00FFCC, phrase: "has become pixelated"             },
-            "luminosity": { name: "[ LUMINOSITY ]",   chance: "1,200,000,000", color: 0xFFFFFF, phrase: "the blinding light has devoured"   },
-            "equinox":    { name: "『EQUINOX』",      chance: "2,500,000,000", color: 0xFF8C00, phrase: "between positive and"              },
-            "leviathan":  { name: "LEVIATHAN",        chance: "1,730,400,000", color: 0x00008B, phrase: "has tamed the ruler of beneath"    },
-            "glitch":     { name: "GLITCH",           chance: "12,210,110",    color: 0x8A2BE2, phrase: "error occured from"                },
-            "nyctophobia":{ name: "NYCTOPHOBIA",      chance: "1,011,111,010", color: 0x1A1A1A, phrase: "experienced the literal nightmare" },
-        };
+                        let username, displayName, aura, chanceStr, embedColor;
+                        let customMatched = false;
 
-        for (const [, entry] of Object.entries(customAuras)) {
-            if (lineLower.includes(entry.phrase)) {
-                const boldMatch = line.match(/\*\*(?:(.+?)\(@(.+?)\)|@(\S+?))\*\*/);
-                if (!boldMatch) {
-                    console.log(`Custom aura line missing bold username (skipping): ${line.slice(0, 80)}`);
+                        for (const [, entry] of Object.entries(customAuras)) {
+                            if (lineLower.includes(entry.phrase)) {
+                                const boldMatch = line.match(/\*\*(?:(.+?)\(@(.+?)\)|@(\S+?))\*\*/);
+                                if (!boldMatch) {
+                                    console.log(`Custom aura line missing bold username (skipping): ${line.slice(0, 80)}`);
+                                    break;
+                                }
+                                username    = boldMatch[2] || boldMatch[3];
+                                displayName = boldMatch[1] || `@${username}`;
+                                aura        = entry.name;
+                                chanceStr   = entry.chance;
+                                embedColor  = entry.color;
+                                customMatched = true;
+                                console.log(`Custom aura detected: ${aura} for ${username}`);
+                                break;
+                            }
+                        }
+
+                        if (!customMatched) {
+                            const m = line.match(
+                                /\*\*(?:(.+?)\(@(.+?)\)|@(\S+?))\*\*.*?(?:HAS FOUND|has found)\s+\*\*(.+?)\*\*.*?(?:CHANCE OF|chance of)\s+\*\*1 IN ([\d,]+)/i
+                            );
+                            if (!m) {
+                                console.log(`Unparseable line (skipping): ${line.slice(0, 80)}`);
+                                continue;
+                            }
+                            username    = m[2] || m[3];
+                            displayName = m[1] || `@${username}`;
+                            aura        = m[4];
+                            chanceStr   = m[5];
+                            embedColor  = null;
+                        }
+
+                        const isBT = lineLower.includes('breakthrough');
+                        const key = username.toLowerCase();
+                        const tracked = trackedRobloxUsers.get(key);
+
+                        if (!tracked) continue;
+
+                        const embedForLine = rawEmbeds[lineIdx];
+                        const rollsVal =
+                            embedForLine?.fields?.find(f => /rolls?/i.test(f.name))?.value
+                            ?? payload.rolls
+                            ?? payload.player?.rolls
+                            ?? 'N/A';
+                        const luckVal =
+                            embedForLine?.fields?.find(f => /luck/i.test(f.name))?.value
+                            ?? payload.luck
+                            ?? payload.player?.luck
+                            ?? 'N/A';
+
+                        totalRollsProcessed++;
+
+                        const trackedProfileURL = `https://www.roblox.com/users/${tracked.id}/profile`;
+
+                        console.log(`Tracked match: ${displayName} (@${username}, ID: ${tracked.id}) found ${aura}`);
+                        linkedEmbeds.push(
+                            new EmbedBuilder()
+                                .setDescription(
+                                    `✅ **Successfully tracked ${displayName} (${username} • ID: ${tracked.id})!**\n` +
+                                    `**${aura}** — 1 in ${chanceStr}${isBT ? '  🔥 **BREAKTHROUGH!**' : ''}\n` +
+                                    `Rolls: ${rollsVal}\n` +
+                                    `Luck: ${luckVal}\n` +
+                                    `[View Roblox Profile](${trackedProfileURL})`
+                                )
+                                .setTimestamp()
+                                .setColor(embedColor ?? (isBT ? colors.error : colors.success))
+                        );
+                    }
+
+                    if (linkedEmbeds.length > 0) {
+                        for (let i = 0; i < linkedEmbeds.length; i += 10) {
+                            linkedWebhookClient.send({
+                                username: overrideUsername ?? payload.username,
+                                avatarURL: overrideAvatarURL ?? payload.avatarURL,
+                                allowedMentions: { parse: [] },
+                                embeds: linkedEmbeds.slice(i, i + 10)
+                            }).catch(err => console.error(`Linked send error: ${err.message}`));
+                        }
+                    }
+
+                    console.log(`Packet processed: ${linkedEmbeds.length} linked match(es).`);
                     break;
-                }
-                username    = boldMatch[2] || boldMatch[3];
-                displayName = boldMatch[1] || `@${username}`;
-                aura        = entry.name;
-                chanceStr   = entry.chance;
-                embedColor  = entry.color;
-                customMatched = true;
-                console.log(`Custom aura detected: ${aura} for ${username}`);
-                break;
-            }
-        }
-
-        if (!customMatched) {
-            const m = line.match(
-                /\*\*(?:(.+?)\(@(.+?)\)|@(\S+?))\*\*.*?(?:HAS FOUND|has found)\s+\*\*(.+?)\*\*.*?(?:CHANCE OF|chance of)\s+\*\*1 IN ([\d,]+)/i
-            );
-            if (!m) {
-                console.log(`Unparseable line (skipping): ${line.slice(0, 80)}`);
-                continue;
-            }
-            username    = m[2] || m[3];
-            displayName = m[1] || `@${username}`;
-            aura        = m[4];
-            chanceStr   = m[5];
-            embedColor  = null;
-        }
-
-        const isBT = lineLower.includes('breakthrough');
-        const key = username.toLowerCase();
-        const tracked = trackedRobloxUsers.get(key);
-
-        if (!tracked) continue;
-
-        const embedForLine = rawEmbeds[lineIdx];
-        const rollsVal =
-            embedForLine?.fields?.find(f => /rolls?/i.test(f.name))?.value
-            ?? payload.rolls
-            ?? payload.player?.rolls
-            ?? 'N/A';
-        const luckVal =
-            embedForLine?.fields?.find(f => /luck/i.test(f.name))?.value
-            ?? payload.luck
-            ?? payload.player?.luck
-            ?? 'N/A';
-
-        totalRollsProcessed++;
-
-        const trackedProfileURL = `https://www.roblox.com/users/${tracked.id}/profile`;
-
-        console.log(`Tracked match: ${displayName} (@${username}, ID: ${tracked.id}) found ${aura}`);
-        linkedEmbeds.push(
-            new EmbedBuilder()
-                .setDescription(
-                    `✅ **Successfully tracked ${displayName} (${username} • ID: ${tracked.id})!**\n` +
-                    `**${aura}** — 1 in ${chanceStr}${isBT ? '  🔥 **BREAKTHROUGH!**' : ''}\n` +
-                    `Rolls: ${rollsVal}\n` +
-                    `Luck: ${luckVal}\n` +
-                    `[View Roblox Profile](${trackedProfileURL})`
-                )
-                .setTimestamp()
-                .setColor(embedColor ?? (isBT ? colors.error : colors.success))
-        );
-    }
-
-    if (linkedEmbeds.length > 0) {
-        for (let i = 0; i < linkedEmbeds.length; i += 10) {
-            linkedWebhookClient.send({
-                username: overrideUsername ?? payload.username,
-                avatarURL: overrideAvatarURL ?? payload.avatarURL,
-                allowedMentions: { parse: [] },
-                embeds: linkedEmbeds.slice(i, i + 10)
-            }).catch(err => console.error(`Linked send error: ${err.message}`));
-        }
-    }
-
-    console.log(`Packet processed: linked ${linkedEmbeds.length} tracked match(es).`);
-    break;
-}
                 }
 
                 default:
@@ -434,9 +429,6 @@ const connect = () => {
                 return;
 
             case 4003: {
-                // Silently retry with backoff — do NOT send a Discord message here,
-                // as 4003 is a transient stale-session state that resolves on its own
-                // and sending a message every retry floods the channel.
                 duplicateRetryCount++;
                 const delay = Math.min(maxReconnectInterval, 5_000 * duplicateRetryCount);
                 console.warn(`API token already in-use (attempt ${duplicateRetryCount}). Retrying in ${delay}ms...`);
