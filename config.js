@@ -4,7 +4,7 @@ const config = {
     "webhookURL": "https://discord.com/api/webhooks/1504121127281098823/jt64o3iRBH36DY0jCyTvQkQYCTQOz_MFlWs5hEOgg6cYnvEy61EcXcxsLcu2e1r7hewL",
 
     // COMMAND CHANNEL — only !linked / !unlinked commands from this channel are accepted
-    "commandChannelId": "1504117473862221955",
+    "commandChannelId": "1504117473862221955","1506247739690848396",
 
     // WEBHOOK USER (OPTIONAL)
     "overrideUsername": null,
